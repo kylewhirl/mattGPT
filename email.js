@@ -11,6 +11,8 @@ require('dotenv').config();
 // Your OpenAI API key
 const API_KEY = process.env.CHATGPT_API_KEY;
 
+const indexStart = 2;
+
 // If modifying these scopes, delete token.json.
 const SCOPES = [
   'https://www.googleapis.com/auth/drive.file',
@@ -126,11 +128,13 @@ async function getChatGPTResponse(prompt, apiKey) {
   const maxTokens = 128000; // Adjust as needed
 
   if (tokenCount > maxTokens) {
-      console.warn(`Prompt exceeds the maximum token limit of ${maxTokens}. Truncating...`);
-      const encodedPrompt = encode(prompt);
-      const maxEncodedLength = maxTokens - 30000; // Leave space for response tokens
-      const truncatedPrompt = decode(encodedPrompt.slice(0, maxEncodedLength));
-      prompt = truncatedPrompt;
+    console.warn(`Prompt exceeds the maximum token limit of ${maxTokens}. Truncating...`);
+    
+    const encodedPrompt = encode(prompt);
+    const maxEncodedLength = maxTokens - 30000; // Leave space for response tokens
+    prompt = decode(encodedPrompt.slice(0, maxEncodedLength));
+    // Clear large variables to free memory
+    encodedPrompt = null; // Help garbage collection
   }
 
   const url = 'https://api.openai.com/v1/chat/completions';
@@ -144,47 +148,63 @@ async function getChatGPTResponse(prompt, apiKey) {
       max_tokens: 4096, // Adjust token count as needed
   };
 
-  while (true) {
-      try {
-          const response = await axios.post(url, data, { headers });
-          return response.data.choices[0].message.content.trim();
-      } catch (error) {
-          if (error.response && error.response.data.error.code === 'rate_limit_exceeded') {
-              // Extract wait time from the error message
-              const message = error.response.data.error.message;
-              const match = message.match(/try again in (\d+(\.\d+)?)s/);
-              if (match) {
-                  const waitTime = parseFloat(match[1]);
-                  console.warn(`Rate limit exceeded. Waiting for ${waitTime} seconds before retrying...`);
-                  await new Promise(resolve => setTimeout(resolve, waitTime * 1000)); // Wait for the specified time
-              } else {
-                  // If we can't find the wait time, log and throw an error
-                  console.error('Error communicating with ChatGPT:', message);
-                  throw error;
-              }
-          } else {
-              console.error('Error communicating with ChatGPT:', error.response ? error.response.data : error.message);
-              throw error; // Rethrow for other types of errors
-          }
+  let attempts = 0;
+  const maxAttempts = 5; // Limit number of retry attempts
+  while (attempts < maxAttempts) {
+    try {
+      const response = await axios.post(url, data, { headers });
+      return response.data.choices[0].message.content.trim();
+    } catch (error) {
+      if (error.response && error.response.data.error.code === 'rate_limit_exceeded') {
+        const message = error.response.data.error.message;
+        const match = message.match(/try again in (\d+(\.\d+)?)s/);
+        if (match) {
+          const waitTime = parseFloat(match[1]);
+          console.warn(`Rate limit exceeded. Waiting for ${waitTime} seconds before retrying...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime * 1000)); // Wait for the specified time
+        } else {
+          console.error('Error communicating with ChatGPT:', message);
+          throw error;
+        }
+      } else {
+        console.error('Error communicating with ChatGPT:', error.response ? error.response.data : error.message);
+        throw error; // Rethrow for other types of errors
       }
+    }
+    attempts++;
   }
+  throw new Error('Max attempts reached, failed to get a response from ChatGPT.');
 }
 
 
-// Function to update Google Sheets data
 async function updateGoogleSheet(sheets, spreadsheetId, range, value) {
-    const updateData = {
+  /*console.log("Starting updateGoogleSheet function");
+  console.log("Spreadsheet ID:", spreadsheetId);
+  console.log("Range:", range);
+  console.log("Value to update:", value);
+  */
+  const updateData = {
       range: range,
       values: [[value]],
-    };
-    
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: spreadsheetId,
-      range: range,
-      valueInputOption: 'RAW',
-      resource: updateData,
-    });
+  };
+  
+  //console.log("Update Data:", JSON.stringify(updateData, null, 2));
+  
+  try {
+      const response = await sheets.spreadsheets.values.update({
+          spreadsheetId: spreadsheetId,
+          range: range,
+          valueInputOption: 'RAW',
+          resource: updateData,
+      });
+      
+      //console.log("Update response:", response);
+  } catch (error) {
+      console.error("Error updating sheet:", error);
   }
+  
+  //console.log("Finished updateGoogleSheet function");
+}
 
 function truncateTo80Chars(text) {
   if (text.length <= 80) return text;
@@ -200,11 +220,12 @@ async function processRow(sheets, rowIndex, row, websiteSummaryPrompt, leadQuali
   const linkedinInfo = row[4] || 'N/A'; // Column M (Index 9)
   const emailSubject = row [6] || 'N/A'
   const emailContent = row[7] || 'N/A'; // Column P (Index 12)
-  const leadType = row[14] || 'N/A'; // Column R (Index 14)
+  const leadType = row[8] || 'N/A'; // Column R (Index 14)
 
   const fullUrl = ensureHttps(companyWebsite);
+  console.log("email "+emailSubject);
 
-  if (companyWebsite !== "N/A" && emailContent === "N/A") {
+  if (companyWebsite !== "N/A" && emailContent === "N/A" && !leadType.includes("Error")) {
       try {
           // Fetch website content
           console.log('Generating Email - Fetching Website Content:', fullUrl);
@@ -225,9 +246,9 @@ async function processRow(sheets, rowIndex, row, websiteSummaryPrompt, leadQuali
           const subjectResponse = await getChatGPTResponse(craftSubjectPrompt.replace('{{email}}', emailResponse), API_KEY);
 
           // Update Google Sheet with the lead quality response in column R and email response in column P
-          const leadQualityRange = `${SHEET_NAME}!I${rowIndex + 2}`;
-          const emailRange = `${SHEET_NAME}!H${rowIndex + 2}`;
-          const subjectRange = `${SHEET_NAME}!G${rowIndex + 2}`;
+          const leadQualityRange = `${SHEET_NAME}!I${rowIndex + indexStart}`;
+          const emailRange = `${SHEET_NAME}!H${rowIndex + indexStart}`;
+          const subjectRange = `${SHEET_NAME}!G${rowIndex + indexStart}`;
 
           await updateGoogleSheet(sheets, SHEET_ID, leadQualityRange, leadQualityResponse);
           await updateGoogleSheet(sheets, SHEET_ID, emailRange, emailResponse);
@@ -238,7 +259,9 @@ async function processRow(sheets, rowIndex, row, websiteSummaryPrompt, leadQuali
           console.log('Lead Quality Response:', truncateTo80Chars(leadQualityResponse));
           console.log('Crafted Email Response:', truncateTo80Chars(emailResponse));
       } catch (err) {
-          console.error(`Error processing row ${rowIndex + 2}:`, err.message);
+          const leadQualityRange = `${SHEET_NAME}!I${rowIndex + indexStart}`;
+          await updateGoogleSheet(sheets, SHEET_ID, leadQualityRange, `Error: ${err.message}`);
+          console.error(`Error processing row ${rowIndex + indexStart}:`, err.message);
       }
   } else if (companyWebsite !== "N/A" && leadType === "N/A") {
       try {
@@ -252,12 +275,10 @@ async function processRow(sheets, rowIndex, row, websiteSummaryPrompt, leadQuali
           console.log('Fetched Content');
           
           // Prepare ChatGPT requests
-          await delay(50);
           const websiteSummaryResponse = await getChatGPTResponse(websiteSummaryPrompt.replace('{{content}}', textContent), API_KEY);
-          await delay(50);
           const leadQualityResponse = await getChatGPTResponse(leadQualityPrompt.replace('{{summary}}', websiteSummaryResponse), API_KEY);
           // Update Google Sheet with the lead quality response in column R and email response in column P
-          const leadQualityRange = `${SHEET_NAME}!I${rowIndex + 2}`;
+          const leadQualityRange = `${SHEET_NAME}!I${rowIndex + indexStart}`;
 
           await updateGoogleSheet(sheets, SHEET_ID, leadQualityRange, leadQualityResponse);
 
@@ -265,7 +286,7 @@ async function processRow(sheets, rowIndex, row, websiteSummaryPrompt, leadQuali
           console.log('Website Summary Response:', truncateTo80Chars(websiteSummaryResponse));
           console.log('Lead Quality Response:', truncateTo80Chars(leadQualityResponse));
       } catch (err) {
-          console.error(`Error processing row ${rowIndex + 2}:`, err.message);
+          console.error(`Error processing row ${rowIndex + indexStart}:`, err.message);
       }
 }
 
@@ -295,7 +316,7 @@ async function fetchSheetData(authClient) {
 
 
       // Get data from row 2 onward
-      const dataRange = `${SHEET_NAME}!A2:I`; // Adjust range as needed
+      const dataRange = `${SHEET_NAME}!A${indexStart}:I`; // Adjust range as needed
       const res = await sheets.spreadsheets.values.get({
           spreadsheetId: SHEET_ID,
           range: dataRange,
@@ -309,7 +330,7 @@ async function fetchSheetData(authClient) {
           const promises = chunk.map((row, rowIndex) => {
               return processRow(sheets, i + rowIndex, row, websiteSummaryPrompt, leadQualityPrompt, craftEmailPrompt, craftSubjectPrompt)
                   .catch(error => {
-                      console.error(`Error processing row ${i + rowIndex + 2}:`, error.message);
+                      console.error(`Error processing row ${i + rowIndex + indexStart}:`, error.message);
                       return null; // Return null to signify failure
                   });
           });
@@ -321,7 +342,7 @@ async function fetchSheetData(authClient) {
           if (failedRowIndices.length > 0) {
               console.log(`Errors occurred in rows: ${failedRowIndices.join(', ')}. Adjusting chunk size...`);
               chunkSize = Math.max(1, failedRowIndices[0] - i); // Adjust chunk size based on the first failed row
-              console.log(`Reprocessing chunk starting from row ${i + 2} to ${i + chunkSize + 1}.`);
+              console.log(`Reprocessing chunk starting from row ${i + indexStart} to ${i + chunkSize + 1}.`);
               i -= chunkSize; // Go back to reprocess the previous chunk
           } else {
               if (i + chunkSize < rows.length) {
