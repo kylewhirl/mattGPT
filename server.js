@@ -55,7 +55,7 @@ app.get('/commence', (req, res) => {
 });
 
 // Start the HTTP server
-const port = process.env.PORT || 4000; // Change to your desired port
+const PORT = process.env.PORT || 4000; // Change to your desired port
 http.createServer(app).listen(PORT, () => {
     console.log(`Server is running at http://192.168.1.234:${PORT}`);
 });
